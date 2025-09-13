@@ -1,0 +1,203 @@
+name: CI/CD Pipeline
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Run Backend Tests
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: backend/package-lock.json
+
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        npm ci
+
+    - name: Run backend tests
+      run: |
+        cd backend
+        npm test
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    name: Build and Deploy to EC2
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Install backend dependencies
+      run: |
+        cd backend
+        npm ci
+
+    - name: Build backend
+      run: |
+        cd backend
+        npm run build
+
+    - name: Install frontend dependencies
+      run: |
+        cd frontend
+        npm ci
+
+    - name: Build frontend
+      run: |
+        cd frontend
+        npm run build
+
+    - name: Create deployment package
+      run: |
+        mkdir -p deployment
+        cp -r backend/dist deployment/
+        cp -r backend/node_modules deployment/
+        cp -r backend/prisma deployment/
+        cp backend/package*.json deployment/
+        cp -r frontend/build deployment/public
+        echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" > deployment/.env
+        echo "DB_USER=LTIdbUser" >> deployment/.env
+        echo "DB_NAME=LTIdb" >> deployment/.env
+        echo "DB_PORT=5432" >> deployment/.env
+        echo 'DATABASE_URL="postgresql://LTIdbUser:${{ secrets.DB_PASSWORD }}@localhost:5432/LTIdb"' >> deployment/.env
+
+    - name: Create deployment archive
+      run: |
+        tar -czf deployment.tar.gz -C deployment .
+
+    - name: Setup EC2 Environment
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Update system packages
+          sudo yum update -y
+          
+          # Install Node.js 18.x
+          curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+          sudo yum install -y nodejs
+          
+          # Install PM2 globally
+          sudo npm install -g pm2
+          
+          # Install PostgreSQL
+          sudo yum install -y postgresql postgresql-server postgresql-contrib
+          
+          # Initialize PostgreSQL database
+          sudo postgresql-setup initdb
+          
+          # Start and enable PostgreSQL
+          sudo systemctl start postgresql
+          sudo systemctl enable postgresql
+          
+          # Configure PostgreSQL
+          sudo -u postgres psql -c "CREATE USER LTIdbUser WITH PASSWORD 'D1ymf8wyQEGthFR1E9xhCq';"
+          sudo -u postgres psql -c "CREATE DATABASE LTIdb OWNER LTIdbUser;"
+          sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE LTIdb TO LTIdbUser;"
+          
+          # Configure PostgreSQL authentication
+          sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = 'localhost'/" /var/lib/pgsql/data/postgresql.conf
+          sudo sed -i "s/local   all             all                                     peer/local   all             all                                     md5/" /var/lib/pgsql/data/pg_hba.conf
+          sudo sed -i "s/host    all             all             127.0.0.1\/32            ident/host    all             all             127.0.0.1\/32            md5/" /var/lib/pgsql/data/pg_hba.conf
+          
+          # Restart PostgreSQL to apply configuration changes
+          sudo systemctl restart postgresql
+          
+          # Verify installations
+          node --version
+          npm --version
+          pm2 --version
+          sudo -u postgres psql -c "SELECT version();"
+          
+          echo "EC2 environment setup completed successfully!"
+
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          # Stop existing application
+          pm2 stop lti-app || true
+          pm2 delete lti-app || true
+          
+          # Create application directory
+          mkdir -p /home/ec2-user/lti-app
+          cd /home/ec2-user/lti-app
+          
+          # Backup current deployment (if exists)
+          if [ -d "current" ]; then
+            rm -rf backup
+            mv current backup
+          fi
+          
+          # Create new deployment directory
+          mkdir -p current
+
+    - name: Copy files to EC2
+      uses: appleboy/scp-action@v0.1.7
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        source: "deployment.tar.gz"
+        target: "/home/ec2-user/lti-app/"
+
+    - name: Extract and setup application
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        script: |
+          cd /home/ec2-user/lti-app
+          
+          # Extract deployment package
+          tar -xzf deployment.tar.gz -C current/
+          rm deployment.tar.gz
+          
+          # Install production dependencies (if needed)
+          cd current
+          npm ci --only=production
+          
+          # Generate Prisma client
+          npx prisma generate
+          
+          # Run database migrations
+          npx prisma migrate deploy
+          
+          # Run seed script
+          npx ts-node prisma/seed.ts || echo "Seed script completed"
+          
+          # Start application with PM2
+          PORT=8080 pm2 start dist/index.js --name "lti-app" --env production
+          
+          # Save PM2 configuration
+          pm2 save
+          pm2 startup || true
+          
+          echo "Deployment completed successfully!"
