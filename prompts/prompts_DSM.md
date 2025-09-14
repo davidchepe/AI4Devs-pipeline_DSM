@@ -53,9 +53,27 @@ After a Pull-request to the main branch, the workflow should:
 - **Application Management**: Stop existing app before deployment ✅
 - **Post-deployment**: Run migrations and seed script ✅
 
----
+### SSH Authentication Issues (September 13, 2025):
+**Error encountered:** `ssh: handshake failed: ssh: unable to authenticate, attempted methods [none publickey], no supported methods remain`
 
-## GitHub Secrets Configuration Instructions
+**Troubleshooting Steps:**
+1. **Verify SSH Key Format**: Ensure the private key in GitHub Secrets is in OpenSSH format
+2. **Check EC2 Security Group**: Port 22 must be open for SSH access
+3. **Verify Key Permissions**: SSH key should have been added to EC2 instance during creation
+4. **Test SSH Connection**: Manually verify SSH connection works with the same credentials
+
+**Key Requirements:**
+- Private key must be complete (including `-----BEGIN OPENSSH PRIVATE KEY-----` and `-----END OPENSSH PRIVATE KEY-----`)
+- No extra spaces or formatting in the GitHub secret
+- EC2 username must match the instance type (ec2-user for Amazon Linux, ubuntu for Ubuntu, etc.)
+
+**Workflow Improvements Added:**
+- Added timeout configurations (300s overall, 30m for commands)
+- Added port specification (22)
+- Improved error handling for repeat deployments
+- Added existence checks for PostgreSQL components
+
+---
 
 ### Required Secrets:
 1. **AWS_ACCESS_KEY_ID**: AWS Access Key ID

@@ -89,47 +89,68 @@ jobs:
         host: ${{ secrets.EC2_HOST }}
         username: ${{ secrets.EC2_USERNAME }}
         key: ${{ secrets.EC2_SSH_KEY }}
+        port: 22
+        timeout: 300s
+        command_timeout: 30m
         script: |
-          # Update system packages
-          sudo yum update -y
-          
-          # Install Node.js 18.x
-          curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
-          sudo yum install -y nodejs
-          
-          # Install PM2 globally
-          sudo npm install -g pm2
-          
-          # Install PostgreSQL
-          sudo yum install -y postgresql postgresql-server postgresql-contrib
-          
-          # Initialize PostgreSQL database
-          sudo postgresql-setup initdb
-          
-          # Start and enable PostgreSQL
-          sudo systemctl start postgresql
-          sudo systemctl enable postgresql
-          
-          # Configure PostgreSQL
-          sudo -u postgres psql -c "CREATE USER LTIdbUser WITH PASSWORD 'D1ymf8wyQEGthFR1E9xhCq';"
-          sudo -u postgres psql -c "CREATE DATABASE LTIdb OWNER LTIdbUser;"
-          sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE LTIdb TO LTIdbUser;"
-          
-          # Configure PostgreSQL authentication
-          sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = 'localhost'/" /var/lib/pgsql/data/postgresql.conf
-          sudo sed -i "s/local   all             all                                     peer/local   all             all                                     md5/" /var/lib/pgsql/data/pg_hba.conf
-          sudo sed -i "s/host    all             all             127.0.0.1\/32            ident/host    all             all             127.0.0.1\/32            md5/" /var/lib/pgsql/data/pg_hba.conf
-          
-          # Restart PostgreSQL to apply configuration changes
-          sudo systemctl restart postgresql
+          # Check if this is the first time setup
+          if ! command -v node &> /dev/null; then
+            echo "Setting up EC2 environment for the first time..."
+            
+            # Update system packages
+            sudo yum update -y
+            
+            # Install Node.js 18.x
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | sudo bash -
+            sudo yum install -y nodejs
+            
+            # Install PM2 globally
+            sudo npm install -g pm2
+            
+            # Install PostgreSQL
+            sudo yum install -y postgresql postgresql-server postgresql-contrib
+            
+            # Initialize PostgreSQL database (only if not already initialized)
+            if [ ! -f /var/lib/pgsql/data/PG_VERSION ]; then
+              sudo postgresql-setup initdb
+            fi
+            
+            # Start and enable PostgreSQL
+            sudo systemctl start postgresql
+            sudo systemctl enable postgresql
+            
+            # Wait for PostgreSQL to be ready
+            sleep 5
+            
+            # Configure PostgreSQL (check if user already exists)
+            if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='ltidbuser'" | grep -q 1; then
+              sudo -u postgres psql -c "CREATE USER LTIdbUser WITH PASSWORD 'D1ymf8wyQEGthFR1E9xhCq';"
+            fi
+            
+            # Create database if it doesn't exist
+            if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw LTIdb; then
+              sudo -u postgres psql -c "CREATE DATABASE LTIdb OWNER LTIdbUser;"
+              sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE LTIdb TO LTIdbUser;"
+            fi
+            
+            # Configure PostgreSQL authentication
+            sudo sed -i "s/#listen_addresses = 'localhost'/listen_addresses = 'localhost'/" /var/lib/pgsql/data/postgresql.conf
+            sudo sed -i "s/local   all             all                                     peer/local   all             all                                     md5/" /var/lib/pgsql/data/pg_hba.conf
+            sudo sed -i "s/host    all             all             127.0.0.1\/32            ident/host    all             all             127.0.0.1\/32            md5/" /var/lib/pgsql/data/pg_hba.conf
+            
+            # Restart PostgreSQL to apply configuration changes
+            sudo systemctl restart postgresql
+            
+            echo "EC2 environment setup completed successfully!"
+          else
+            echo "EC2 environment already configured, skipping setup..."
+          fi
           
           # Verify installations
           node --version
           npm --version
           pm2 --version
-          sudo -u postgres psql -c "SELECT version();"
-          
-          echo "EC2 environment setup completed successfully!"
+          sudo systemctl status postgresql --no-pager
 
     - name: Deploy to EC2
       uses: appleboy/ssh-action@v1.0.3
